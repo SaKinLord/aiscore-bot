@@ -639,12 +639,16 @@ def _scrape_with_camoufox(max_matches, headless):
     """Camoufox (Cloudflare-bypass'lı Firefox fork'u) ile scrape."""
     print("Scraper: tarayici motoru = camoufox")
     # Camoufox kendi context yonetimini yapar; new_page direkt browser uzerinden.
+    # NOT: timezone'i eksplicit set ediyoruz — GitHub Actions runner'i US'te;
+    # geoip=True olsaydi tarayici US Eastern'a duser ve AiScore mac saatlerini
+    # o TZ'ye gore gosterirdi. Turkiye saatini saglamak icin override.
     with Camoufox(
         headless=headless,
         os=("windows",),
         locale=["tr-TR", "tr"],
+        timezone="Europe/Istanbul",
         humanize=True,  # mouse hareketlerini insanci yapar (Cloudflare karsi)
-        geoip=True,     # outgoing IP'ye gore lokasyon spoof
+        geoip=True,     # IP-bazli geo spoof (timezone yukarida override edildi)
     ) as browser:
         page = browser.new_page()
         return _run_scrape(page, max_matches)
