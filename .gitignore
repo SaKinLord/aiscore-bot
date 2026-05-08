@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Local DB (Railway uses volume mount)
+*.db
+*.db-journal
+
+# Debug artefactları
+*.html
+*.png
+nuxt_state.js
+nuxt_parsed.json
+
+# Local env override
+.env
+.env.local
+
+# Yardımcı / keşif scriptleri (deploy etme)
+probe_*.py
+test_*.py
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

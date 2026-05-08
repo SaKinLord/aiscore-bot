@@ -1,0 +1,29 @@
+# Local geliştirme artıkları — image'a girmesin.
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# HTML/PNG/dump artifactları (debug çıktıları, gerek yok).
+*.html
+*.png
+nuxt_state.js
+nuxt_parsed.json
+
+# SQLite — production'da volume mount uzerinde olusturulacak.
+aiscore_bot.db
+*.db-journal
+
+# Yardımcı/keşif scriptleri (image'da çalışmaları gerekmiyor).
+probe_*.py
+test_*.py
+
+# Git/IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
