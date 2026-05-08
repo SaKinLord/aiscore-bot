@@ -649,7 +649,7 @@ def _scrape_with_camoufox(max_matches, headless):
     # — geoip JS-level spoof, bu yuzden Cloudflare bypass'i etkilemez.
     with Camoufox(
         headless=headless,
-        os=("windows",),
+        os="windows",
         locale=["tr-TR", "tr"],
         humanize=True,
         geoip="195.175.39.39",
