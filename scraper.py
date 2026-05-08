@@ -642,13 +642,17 @@ def _scrape_with_camoufox(max_matches, headless):
     # NOT: timezone'i eksplicit set ediyoruz — GitHub Actions runner'i US'te;
     # geoip=True olsaydi tarayici US Eastern'a duser ve AiScore mac saatlerini
     # o TZ'ye gore gosterirdi. Turkiye saatini saglamak icin override.
+    # Camoufox 0.4.x'te explicit timezone parametresi yok; geoip'e Turkiye
+    # IP'si vererek MaxMind DB'den TZ + locale + koordinat otomatik set olur.
+    # 195.175.39.39 = Turk Telekom DNS, MaxMind'de TR olarak kayitli.
+    # Cloudflare hala outgoing GitHub Actions IP'sini gorur (network katmani)
+    # — geoip JS-level spoof, bu yuzden Cloudflare bypass'i etkilemez.
     with Camoufox(
         headless=headless,
         os=("windows",),
         locale=["tr-TR", "tr"],
-        timezone_id="Europe/Istanbul",  # Playwright konvansiyonu; geoip'i override eder
-        humanize=True,  # mouse hareketlerini insanci yapar (Cloudflare karsi)
-        geoip=True,     # IP-bazli geo spoof (timezone yukarida override edildi)
+        humanize=True,
+        geoip="195.175.39.39",
     ) as browser:
         page = browser.new_page()
         return _run_scrape(page, max_matches)
