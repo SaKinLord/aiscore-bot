@@ -3,3 +3,5 @@ beautifulsoup4==4.14.3
 requests==2.33.1
 schedule==1.2.2
 python-dotenv==1.0.1
+playwright-stealth==1.0.6
+tzdata==2024.1

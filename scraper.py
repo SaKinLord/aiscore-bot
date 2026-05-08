@@ -3,6 +3,13 @@ import os
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 
+# Cloudflare/headless detection'i atlatmak icin playwright-stealth
+# (navigator.webdriver, canvas, plugin patches). Local'de yoksa sessizce skip.
+try:
+    from playwright_stealth import stealth_sync
+except ImportError:  # pragma: no cover
+    stealth_sync = None
+
 BASE_URL = "https://www.aiscore.com"
 MAX_MATCHES_PER_SCAN = 20  # cap per scan; combined with Sort-by-time toggle
 ODDS_PAGE_TIMEOUT = 25000   # navigation (page.goto) timeout
@@ -292,6 +299,13 @@ def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=N
             """
         )
         page = context.new_page()
+
+        # Cloudflare/headless detection'a karsi stealth patch'i (varsa).
+        if stealth_sync is not None:
+            try:
+                stealth_sync(page)
+            except Exception as e:
+                print(f"Scraper Uyarisi: stealth_sync uygulanamadi: {e}")
 
         def _prepare_scheduled_list():
             """Scheduled tab'ina geç, Sort-by-time'i aç, ilk batch'i hasat et.

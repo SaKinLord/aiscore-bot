@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 # Local'de .env'i yukle; Railway'de zaten env'ler injected geliyor (load_dotenv no-op).
 load_dotenv()
 
+# Container TZ env'ini Python time modulune yansit (POSIX'te tzset gereklidir).
+if hasattr(time, "tzset"):
+    time.tzset()
+
 from database import init_db, has_alert_been_sent, record_alert
 from scraper import get_formatted_matches_with_odds
 from analyzer import check_side_change, check_odds_repeat, check_historical_match
