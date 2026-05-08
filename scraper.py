@@ -3,16 +3,18 @@ import time
 
 from bs4 import BeautifulSoup
 
-# Cloudflare/headless detection'i atlatmak icin patchright kullaniyoruz.
-# patchright = playwright-fork + bot-detection patch'leri (CDP/runtime fingerprint
-# spoofing, navigator.webdriver gizleme, plugin/canvas hile vb.). API ozdes.
-# Local'de patchright yoksa playwright'a fallback yaparız.
-_USING_PATCHRIGHT = False
+# Plain playwright her durumda fallback olarak duruyor.
+from playwright.sync_api import sync_playwright
+
+# camoufox: Cloudflare bypass icin ozel patch'lenmis Firefox fork'u.
+# USE_CAMOUFOX env'i set ise primary engine olarak kullanilir; degilse playwright.
+_USE_CAMOUFOX = os.environ.get("USE_CAMOUFOX", "").lower() in ("1", "true", "yes")
 try:
-    from patchright.sync_api import sync_playwright
-    _USING_PATCHRIGHT = True
+    from camoufox.sync_api import Camoufox
+    _CAMOUFOX_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    from playwright.sync_api import sync_playwright
+    Camoufox = None
+    _CAMOUFOX_AVAILABLE = False
 
 BASE_URL = "https://www.aiscore.com"
 MAX_MATCHES_PER_SCAN = 20  # cap per scan; combined with Sort-by-time toggle
@@ -265,16 +267,287 @@ def _parse_home_page(html):
     return matches
 
 
-def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=None):
-    """
-    Scrape AiScore for scheduled (upcoming) matches and pull their real
-    opening + current (pre-match) 1X2 odds from each match's /odds page.
-    Returns a list of dicts shaped for analyzer/main.py.
-    """
-    if headless is None:
-        headless = DEFAULT_HEADLESS
+def _run_scrape(page, max_matches):
+    """Engine-bagimsiz scrape akisi. Onceden acilmis bir page bekler.
+    Tum harvest + odds-fetch logic'i burada; tek sonuc olarak results listesi doner."""
     results = []
 
+    def _prepare_scheduled_list():
+        """Scheduled tab'ina geç, Sort-by-time'i aç, ilk batch'i hasat et.
+        Reload retry'da çağrılabilsin diye fonksiyon olarak ayrıldı."""
+        print("Scraper: 'Scheduled' sekmesine geciliyor...")
+        try:
+            page.wait_for_selector(".changeItem", state="attached", timeout=30000)
+        except Exception as e:
+            print(f"Scraper Uyarisi: Tab serisi yuklenmedi: {e}")
+
+        clicked = False
+        try:
+            page.locator(".changeItem", has_text="Scheduled").first.click(timeout=10000)
+            clicked = True
+        except Exception as e:
+            print(f"Scraper Uyarisi: locator click basarisiz, JS fallback: {e}")
+        if not clicked:
+            try:
+                clicked = page.evaluate(
+                    """() => {
+                        const els = Array.from(document.querySelectorAll('.changeItem'));
+                        const t = els.find(e => /^scheduled\\b/i.test((e.textContent || '').trim()));
+                        if (t) { t.click(); return true; }
+                        return false;
+                    }"""
+                )
+            except Exception as e:
+                print(f"Scraper Uyarisi: JS click hatasi: {e}")
+
+        if clicked:
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const els = Array.from(document.querySelectorAll('.changeItem'));
+                        const a = els.find(e => e.className.includes('activ')
+                            && /^scheduled\\b/i.test((e.textContent || '').trim()));
+                        return !!a;
+                    }""",
+                    timeout=10000,
+                )
+                print("Scraper: Scheduled tab aktif.")
+            except Exception:
+                print("Scraper Uyarisi: Scheduled tab aktiflesmedi (devam ediliyor).")
+        else:
+            print("Scraper Hatasi: Scheduled tab tiklanamadi.")
+
+        try:
+            page.wait_for_function(
+                "() => document.querySelectorAll('a.match-container').length > 0",
+                timeout=20000,
+            )
+        except Exception:
+            print("Scraper Uyarisi: Scheduled listesi 20s icinde DOM'a inmedi (gerckten bos olabilir).")
+        page.wait_for_timeout(2000)
+
+        if "Just a moment" in page.content():
+            print("Scraper Hatasi: Cloudflare asilamadi.")
+            return None
+
+        print("Scraper: 'Sort by time' kutusu isaretleniyor...")
+        sort_state = page.evaluate(
+            """() => {
+                const box = document.querySelector('.sortByBox');
+                if (!box) return 'no-box';
+                const cb = box.querySelector('.el-checkbox__input');
+                if (cb && cb.className.includes('is-checked')) return 'already-on';
+                const target = box.querySelector('.el-checkbox__inner')
+                    || box.querySelector('.sortByText')
+                    || box;
+                target.click();
+                return 'clicked';
+            }"""
+        )
+        print(f"Scraper: sort-by-time sonucu = {sort_state}")
+        if sort_state == 'clicked':
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const cb = document.querySelector('.sortByBox .el-checkbox__input');
+                        return cb && cb.className.includes('is-checked');
+                    }""",
+                    timeout=5000,
+                )
+            except Exception:
+                print("Scraper Uyarisi: sort-by-time checkbox aktif konuma gectigi dogrulanamadi.")
+            page.wait_for_timeout(1500)
+
+        target_count = max_matches if (max_matches and max_matches > 0) else 0
+        if target_count:
+            print(f"Scraper: Tepedeki ilk {target_count} mac toplaniyor...")
+        else:
+            print("Scraper: Tum maclari toplamak icin liste kaydiriliyor...")
+        try:
+            return page.evaluate(_HARVEST_SCRIPT, target_count)
+        except Exception as e:
+            print(f"Scraper Hatasi: Mac listesi toplanamadi: {e}")
+            return None
+
+    def _is_desktop_render():
+        """Sayfa masaüstü mü mobil mi yüklenmiş onu söyler.
+        URL'e ve masaüstüne özgü iki konteynerin varlığına bakar."""
+        try:
+            url = page.url or ""
+        except Exception:
+            url = ""
+        on_mobile_host = "m.aiscore.com" in url.lower()
+        try:
+            desktop_markers = page.evaluate(
+                """() => ({
+                    changTabBox: !!document.querySelector('.changTabBox'),
+                    sortByBox: !!document.querySelector('.sortByBox'),
+                })"""
+            )
+        except Exception:
+            desktop_markers = {"changTabBox": False, "sortByBox": False}
+        return (
+            not on_mobile_host
+            and desktop_markers.get("changTabBox", False)
+        ), {
+            "url": url,
+            "on_mobile_host": on_mobile_host,
+            **desktop_markers,
+        }
+
+    # Cloudflare Managed Challenge yok olana + aiscore DOM gelene kadar
+    # bekleyen akilli bir wait. Cloudflare JS challenge'i 5-25sn surebilir.
+    _CF_WAIT_SCRIPT = """() => {
+        const txt = (document.body && document.body.innerText) || '';
+        const cfActive = !!document.querySelector('[name="cf-turnstile-response"]')
+            || /Just a moment|Dogrulaniyor|Doğrulanıyor|Verifying you are human|cf-spinner/i.test(txt);
+        if (cfActive) return false;          // hala challenge ekraninda
+        return !!document.querySelector('.changTabBox');  // gercek site geldi
+    }"""
+
+    def _wait_past_cloudflare(timeout_ms):
+        """Cloudflare challenge'inin kendiliginden cozulmesini bekler.
+        True: cozuldu ve aiscore DOM mevcut. False: timeout."""
+        try:
+            page.wait_for_function(_CF_WAIT_SCRIPT, timeout=timeout_ms)
+            return True
+        except Exception:
+            return False
+
+    try:
+        print("Scraper: AiScore ana sayfasi aciliyor...")
+        page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+
+        # Cloudflare challenge'in kendi kendine cozulmesi icin yeterli sure ver.
+        print("Scraper: Cloudflare/Vue render bekleniyor (45sn'e kadar)...")
+        cf_ok = _wait_past_cloudflare(45000)
+        if cf_ok:
+            print("Scraper: site DOM'a indi (Cloudflare gecildi veya hic yoktu).")
+        is_desktop, render_info = _is_desktop_render()
+        if not is_desktop:
+            print(f"Scraper Uyarisi: masaüstü render dogrulanamadi {render_info}; tekrar yukleniyor...")
+            try:
+                page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+                print("Scraper: 2. denemede Cloudflare/Vue bekleniyor (45sn)...")
+                _wait_past_cloudflare(45000)
+                is_desktop, render_info = _is_desktop_render()
+            except Exception as e:
+                print(f"Scraper Uyarisi: ikinci goto basarisiz: {e}")
+            if is_desktop:
+                print("Scraper: ikinci denemede masaüstü render geldi.")
+            else:
+                print(f"Scraper Uyarisi: hala masaüstü degil {render_info}; yine de devam ediliyor.")
+                # Tani amacli: page HTML + screenshot'i volume'e dump et,
+                # ardindan Telegram'a yolla (Railway'e shell ile baglanmadan
+                # Cloudflare'in ne gosterdigini gorebilelim).
+                diag_dir = "/data" if os.path.isdir("/data") else os.getcwd()
+                try:
+                    ts = time.strftime("%Y%m%d_%H%M%S")
+                    html_path = os.path.join(diag_dir, f"render_fail_{ts}.html")
+                    png_path = os.path.join(diag_dir, f"render_fail_{ts}.png")
+                    with open(html_path, "w", encoding="utf-8") as f:
+                        f.write(page.content())
+                    page.screenshot(path=png_path, full_page=True)
+                    print(f"Scraper Tani: dump yazildi -> {html_path} ; {png_path}")
+                    try:
+                        from telegram_bot import send_document
+                        caption = f"render_fail @ {ts}\n{render_info}"
+                        send_document(png_path, caption=caption)
+                        send_document(html_path, caption=f"render_fail HTML @ {ts}")
+                    except Exception as e:
+                        print(f"Scraper Uyarisi: tani dosyalari Telegram'a yollanamadi: {e}")
+                except Exception as e:
+                    print(f"Scraper Uyarisi: tani dump basarisiz: {e}")
+
+        raw_matches = _prepare_scheduled_list()
+
+        # Boş hasat genelde mobil/eksik render veya geç hidrasyon kaynaklı.
+        # Sayfayı 1 kere reload edip yeniden dene; intermitting durumlar bu şekilde kırılır.
+        if not raw_matches:
+            print("Scraper: ilk denemede 0 mac. Sayfa yenilenip tekrar denenecek...")
+            try:
+                page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+                raw_matches = _prepare_scheduled_list()
+            except Exception as e:
+                print(f"Scraper Uyarisi: reload basarisiz: {e}")
+
+        if not raw_matches:
+            return results
+
+        match_list = _normalize_harvested(raw_matches)
+        match_list.sort(key=_start_time_sort_key)
+        print(f"Scraper: Ana sayfada {len(match_list)} mac toplandi (basla saatine gore siralandi).")
+
+        if max_matches and max_matches > 0:
+            match_list = match_list[:max_matches]
+            print(f"Scraper: ilk {len(match_list)} mac taranacak.")
+
+        for idx, m in enumerate(match_list, start=1):
+            odds_url = m["oddsUrl"]
+            try:
+                print(
+                    f"  [{idx}/{len(match_list)}] {m['homeTeam']} vs "
+                    f"{m['awayTeam']} -> oranlar cekiliyor"
+                )
+                page.goto(odds_url, wait_until="domcontentloaded", timeout=ODDS_PAGE_TIMEOUT)
+                # The odds DOM nodes are rendered hidden until the user scrolls/expands,
+                # so wait for them to be *attached* (not necessarily visible). Bu
+                # bekleme oranlar acilana kadar surer; oran yoksa varsayilan 25sn
+                # tamamen bos gecerdi, bu yuzden ayri/kisa bir timeout kullaniyoruz.
+                try:
+                    page.wait_for_selector(
+                        ".openingBg1", state="attached", timeout=ODDS_WAIT_TIMEOUT
+                    )
+                except Exception:
+                    print("    ! oran tablosu yuklenmedi, atlandi")
+                    continue
+                page.wait_for_timeout(800)
+                odds_html = page.content()
+            except Exception as e:
+                print(f"    ! oran sayfasi yuklenemedi: {e}")
+                continue
+
+            opening, closing = _extract_opening_and_closing(odds_html)
+            if not opening or not closing:
+                print("    ! 1X2 oran satiri bulunamadi, atlandi")
+                continue
+
+            results.append(
+                {
+                    "id": m["id"],
+                    "homeTeam": m["homeTeam"],
+                    "awayTeam": m["awayTeam"],
+                    "league": m["league"],
+                    "startTime": m.get("startTime", ""),
+                    "oddsOpening": opening,
+                    "oddsClosing": closing,
+                }
+            )
+    except Exception as e:
+        print(f"Scraper Hatasi (run): {e}")
+
+    print(f"Scraper: {len(results)} mac icin acilis+guncel oranlar elde edildi.")
+    return results
+
+
+def _scrape_with_camoufox(max_matches, headless):
+    """Camoufox (Cloudflare-bypass'lı Firefox fork'u) ile scrape."""
+    print("Scraper: tarayici motoru = camoufox")
+    # Camoufox kendi context yonetimini yapar; new_page direkt browser uzerinden.
+    with Camoufox(
+        headless=headless,
+        os=("windows",),
+        locale=["tr-TR", "tr"],
+        humanize=True,  # mouse hareketlerini insanci yapar (Cloudflare karsi)
+        geoip=True,     # outgoing IP'ye gore lokasyon spoof
+    ) as browser:
+        page = browser.new_page()
+        return _run_scrape(page, max_matches)
+
+
+def _scrape_with_playwright(max_matches, headless):
+    """Standart playwright (Chromium) ile scrape — local dev ve fallback."""
+    print("Scraper: tarayici motoru = playwright")
     with sync_playwright() as p:
         # Container ortaminda Chromium icin guvenli args:
         #   --no-sandbox: Docker'da root yoksa sandbox crash eder
@@ -283,293 +556,51 @@ def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=N
             headless=headless,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
-            screen={"width": 1920, "height": 1080},
-            device_scale_factor=1,
-            is_mobile=False,
-            has_touch=False,
-            # AiScore decides "today" using the browser's locale/timezone — without
-            # this it falls back to UTC and the Scheduled list often comes back empty.
-            locale="tr-TR",
-            timezone_id="Europe/Istanbul",
-        )
-        # Belt-and-suspenders: some sites sniff navigator/touch events even when
-        # the UA looks desktop. Spoof the desktop-shaped values before any page JS runs.
-        context.add_init_script(
-            """
-            Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
-            Object.defineProperty(navigator, 'userAgentData', { get: () => undefined });
-            Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-            """
-        )
-        page = context.new_page()
-        print(f"Scraper: tarayici motoru = {'patchright' if _USING_PATCHRIGHT else 'playwright (fallback)'}")
-
-        def _prepare_scheduled_list():
-            """Scheduled tab'ina geç, Sort-by-time'i aç, ilk batch'i hasat et.
-            Reload retry'da çağrılabilsin diye fonksiyon olarak ayrıldı."""
-            print("Scraper: 'Scheduled' sekmesine geciliyor...")
-            try:
-                page.wait_for_selector(".changeItem", state="attached", timeout=30000)
-            except Exception as e:
-                print(f"Scraper Uyarisi: Tab serisi yuklenmedi: {e}")
-
-            clicked = False
-            try:
-                page.locator(".changeItem", has_text="Scheduled").first.click(timeout=10000)
-                clicked = True
-            except Exception as e:
-                print(f"Scraper Uyarisi: locator click basarisiz, JS fallback: {e}")
-            if not clicked:
-                try:
-                    clicked = page.evaluate(
-                        """() => {
-                            const els = Array.from(document.querySelectorAll('.changeItem'));
-                            const t = els.find(e => /^scheduled\\b/i.test((e.textContent || '').trim()));
-                            if (t) { t.click(); return true; }
-                            return false;
-                        }"""
-                    )
-                except Exception as e:
-                    print(f"Scraper Uyarisi: JS click hatasi: {e}")
-
-            if clicked:
-                try:
-                    page.wait_for_function(
-                        """() => {
-                            const els = Array.from(document.querySelectorAll('.changeItem'));
-                            const a = els.find(e => e.className.includes('activ')
-                                && /^scheduled\\b/i.test((e.textContent || '').trim()));
-                            return !!a;
-                        }""",
-                        timeout=10000,
-                    )
-                    print("Scraper: Scheduled tab aktif.")
-                except Exception:
-                    print("Scraper Uyarisi: Scheduled tab aktiflesmedi (devam ediliyor).")
-            else:
-                print("Scraper Hatasi: Scheduled tab tiklanamadi.")
-
-            try:
-                page.wait_for_function(
-                    "() => document.querySelectorAll('a.match-container').length > 0",
-                    timeout=20000,
-                )
-            except Exception:
-                print("Scraper Uyarisi: Scheduled listesi 20s icinde DOM'a inmedi (gerckten bos olabilir).")
-            page.wait_for_timeout(2000)
-
-            if "Just a moment" in page.content():
-                print("Scraper Hatasi: Cloudflare asilamadi.")
-                return None
-
-            print("Scraper: 'Sort by time' kutusu isaretleniyor...")
-            sort_state = page.evaluate(
-                """() => {
-                    const box = document.querySelector('.sortByBox');
-                    if (!box) return 'no-box';
-                    const cb = box.querySelector('.el-checkbox__input');
-                    if (cb && cb.className.includes('is-checked')) return 'already-on';
-                    const target = box.querySelector('.el-checkbox__inner')
-                        || box.querySelector('.sortByText')
-                        || box;
-                    target.click();
-                    return 'clicked';
-                }"""
-            )
-            print(f"Scraper: sort-by-time sonucu = {sort_state}")
-            if sort_state == 'clicked':
-                try:
-                    page.wait_for_function(
-                        """() => {
-                            const cb = document.querySelector('.sortByBox .el-checkbox__input');
-                            return cb && cb.className.includes('is-checked');
-                        }""",
-                        timeout=5000,
-                    )
-                except Exception:
-                    print("Scraper Uyarisi: sort-by-time checkbox aktif konuma gectigi dogrulanamadi.")
-                page.wait_for_timeout(1500)
-
-            target_count = max_matches if (max_matches and max_matches > 0) else 0
-            if target_count:
-                print(f"Scraper: Tepedeki ilk {target_count} mac toplaniyor...")
-            else:
-                print("Scraper: Tum maclari toplamak icin liste kaydiriliyor...")
-            try:
-                return page.evaluate(_HARVEST_SCRIPT, target_count)
-            except Exception as e:
-                print(f"Scraper Hatasi: Mac listesi toplanamadi: {e}")
-                return None
-
-        def _is_desktop_render():
-            """Sayfa masaüstü mü mobil mi yüklenmiş onu söyler.
-            URL'e ve masaüstüne özgü iki konteynerin varlığına bakar."""
-            try:
-                url = page.url or ""
-            except Exception:
-                url = ""
-            on_mobile_host = "m.aiscore.com" in url.lower()
-            try:
-                desktop_markers = page.evaluate(
-                    """() => ({
-                        changTabBox: !!document.querySelector('.changTabBox'),
-                        sortByBox: !!document.querySelector('.sortByBox'),
-                    })"""
-                )
-            except Exception:
-                desktop_markers = {"changTabBox": False, "sortByBox": False}
-            return (
-                not on_mobile_host
-                and desktop_markers.get("changTabBox", False)
-            ), {
-                "url": url,
-                "on_mobile_host": on_mobile_host,
-                **desktop_markers,
-            }
-
-        # Cloudflare Managed Challenge yok olana + aiscore DOM gelene kadar
-        # bekleyen akilli bir wait. Cloudflare JS challenge'i 5-25sn surebilir.
-        _CF_WAIT_SCRIPT = """() => {
-            const txt = (document.body && document.body.innerText) || '';
-            const cfActive = !!document.querySelector('[name="cf-turnstile-response"]')
-                || /Just a moment|Dogrulaniyor|Doğrulanıyor|Verifying you are human|cf-spinner/i.test(txt);
-            if (cfActive) return false;          // hala challenge ekraninda
-            return !!document.querySelector('.changTabBox');  // gercek site geldi
-        }"""
-
-        def _wait_past_cloudflare(timeout_ms):
-            """Cloudflare challenge'inin kendiliginden cozulmesini bekler.
-            True: cozuldu ve aiscore DOM mevcut. False: timeout."""
-            try:
-                page.wait_for_function(_CF_WAIT_SCRIPT, timeout=timeout_ms)
-                return True
-            except Exception:
-                return False
-
         try:
-            print("Scraper: AiScore ana sayfasi aciliyor...")
-            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
-
-            # Cloudflare challenge'in kendi kendine cozulmesi icin yeterli sure ver.
-            print("Scraper: Cloudflare/Vue render bekleniyor (45sn'e kadar)...")
-            cf_ok = _wait_past_cloudflare(45000)
-            if cf_ok:
-                print("Scraper: site DOM'a indi (Cloudflare gecildi veya hic yoktu).")
-            is_desktop, render_info = _is_desktop_render()
-            if not is_desktop:
-                print(f"Scraper Uyarisi: masaüstü render dogrulanamadi {render_info}; tekrar yukleniyor...")
-                try:
-                    page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
-                    print("Scraper: 2. denemede Cloudflare/Vue bekleniyor (45sn)...")
-                    _wait_past_cloudflare(45000)
-                    is_desktop, render_info = _is_desktop_render()
-                except Exception as e:
-                    print(f"Scraper Uyarisi: ikinci goto basarisiz: {e}")
-                if is_desktop:
-                    print("Scraper: ikinci denemede masaüstü render geldi.")
-                else:
-                    print(f"Scraper Uyarisi: hala masaüstü degil {render_info}; yine de devam ediliyor.")
-                    # Tani amacli: page HTML + screenshot'i volume'e dump et,
-                    # ardindan Telegram'a yolla (Railway'e shell ile baglanmadan
-                    # Cloudflare'in ne gosterdigini gorebilelim).
-                    diag_dir = "/data" if os.path.isdir("/data") else os.getcwd()
-                    try:
-                        ts = time.strftime("%Y%m%d_%H%M%S")
-                        html_path = os.path.join(diag_dir, f"render_fail_{ts}.html")
-                        png_path = os.path.join(diag_dir, f"render_fail_{ts}.png")
-                        with open(html_path, "w", encoding="utf-8") as f:
-                            f.write(page.content())
-                        page.screenshot(path=png_path, full_page=True)
-                        print(f"Scraper Tani: dump yazildi -> {html_path} ; {png_path}")
-                        try:
-                            from telegram_bot import send_document
-                            caption = f"render_fail @ {ts}\n{render_info}"
-                            send_document(png_path, caption=caption)
-                            send_document(html_path, caption=f"render_fail HTML @ {ts}")
-                        except Exception as e:
-                            print(f"Scraper Uyarisi: tani dosyalari Telegram'a yollanamadi: {e}")
-                    except Exception as e:
-                        print(f"Scraper Uyarisi: tani dump basarisiz: {e}")
-
-            raw_matches = _prepare_scheduled_list()
-
-            # Boş hasat genelde mobil/eksik render veya geç hidrasyon kaynaklı.
-            # Sayfayı 1 kere reload edip yeniden dene; intermitting durumlar bu şekilde kırılır.
-            if not raw_matches:
-                print("Scraper: ilk denemede 0 mac. Sayfa yenilenip tekrar denenecek...")
-                try:
-                    page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
-                    raw_matches = _prepare_scheduled_list()
-                except Exception as e:
-                    print(f"Scraper Uyarisi: reload basarisiz: {e}")
-
-            if not raw_matches:
-                browser.close()
-                return results
-
-            match_list = _normalize_harvested(raw_matches)
-            match_list.sort(key=_start_time_sort_key)
-            print(f"Scraper: Ana sayfada {len(match_list)} mac toplandi (basla saatine gore siralandi).")
-
-            if max_matches and max_matches > 0:
-                match_list = match_list[:max_matches]
-                print(f"Scraper: ilk {len(match_list)} mac taranacak.")
-
-            for idx, m in enumerate(match_list, start=1):
-                odds_url = m["oddsUrl"]
-                try:
-                    print(
-                        f"  [{idx}/{len(match_list)}] {m['homeTeam']} vs "
-                        f"{m['awayTeam']} -> oranlar cekiliyor"
-                    )
-                    page.goto(odds_url, wait_until="domcontentloaded", timeout=ODDS_PAGE_TIMEOUT)
-                    # The odds DOM nodes are rendered hidden until the user scrolls/expands,
-                    # so wait for them to be *attached* (not necessarily visible). Bu
-                    # bekleme oranlar acilana kadar surer; oran yoksa varsayilan 25sn
-                    # tamamen bos gecerdi, bu yuzden ayri/kisa bir timeout kullaniyoruz.
-                    try:
-                        page.wait_for_selector(
-                            ".openingBg1", state="attached", timeout=ODDS_WAIT_TIMEOUT
-                        )
-                    except Exception:
-                        print("    ! oran tablosu yuklenmedi, atlandi")
-                        continue
-                    page.wait_for_timeout(800)
-                    odds_html = page.content()
-                except Exception as e:
-                    print(f"    ! oran sayfasi yuklenemedi: {e}")
-                    continue
-
-                opening, closing = _extract_opening_and_closing(odds_html)
-                if not opening or not closing:
-                    print("    ! 1X2 oran satiri bulunamadi, atlandi")
-                    continue
-
-                results.append(
-                    {
-                        "id": m["id"],
-                        "homeTeam": m["homeTeam"],
-                        "awayTeam": m["awayTeam"],
-                        "league": m["league"],
-                        "startTime": m.get("startTime", ""),
-                        "oddsOpening": opening,
-                        "oddsClosing": closing,
-                    }
-                )
-        except Exception as e:
-            print(f"Scraper Playwright Hatasi: {e}")
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1920, "height": 1080},
+                screen={"width": 1920, "height": 1080},
+                device_scale_factor=1,
+                is_mobile=False,
+                has_touch=False,
+                # AiScore "today" hesabini browser locale/timezone'una gore yapiyor.
+                locale="tr-TR",
+                timezone_id="Europe/Istanbul",
+            )
+            context.add_init_script(
+                """
+                Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+                Object.defineProperty(navigator, 'userAgentData', { get: () => undefined });
+                Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+                """
+            )
+            page = context.new_page()
+            return _run_scrape(page, max_matches)
         finally:
             browser.close()
 
-    print(f"Scraper: {len(results)} mac icin acilis+guncel oranlar elde edildi.")
-    return results
+
+def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=None):
+    """
+    Scrape AiScore for scheduled (upcoming) matches and pull their real
+    opening + current (pre-match) 1X2 odds from each match's /odds page.
+    USE_CAMOUFOX env'i set ise camoufox; degilse playwright kullanir.
+    """
+    if headless is None:
+        headless = DEFAULT_HEADLESS
+    if _USE_CAMOUFOX and _CAMOUFOX_AVAILABLE:
+        try:
+            return _scrape_with_camoufox(max_matches, headless)
+        except Exception as e:
+            print(f"Scraper Uyarisi: camoufox hata verdi, playwright'a fallback: {e}")
+    elif _USE_CAMOUFOX and not _CAMOUFOX_AVAILABLE:
+        print("Scraper Uyarisi: USE_CAMOUFOX set ama camoufox import edilemedi; playwright kullaniliyor.")
+    return _scrape_with_playwright(max_matches, headless)
 
 
 def get_formatted_matches_with_odds():

@@ -1,5 +1,5 @@
 playwright==1.59.0
-patchright==1.59.1
+camoufox[geoip]==0.4.9
 beautifulsoup4==4.14.3
 requests==2.33.1
 schedule==1.2.2
