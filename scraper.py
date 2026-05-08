@@ -459,8 +459,9 @@ def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=N
                     print("Scraper: ikinci denemede masaüstü render geldi.")
                 else:
                     print(f"Scraper Uyarisi: hala masaüstü degil {render_info}; yine de devam ediliyor.")
-                    # Tani amacli: page HTML + screenshot'i volume'e dump et.
-                    # Railway dosya yoneticisinden indirip Cloudflare ne gostermis bakabiliriz.
+                    # Tani amacli: page HTML + screenshot'i volume'e dump et,
+                    # ardindan Telegram'a yolla (Railway'e shell ile baglanmadan
+                    # Cloudflare'in ne gosterdigini gorebilelim).
                     diag_dir = "/data" if os.path.isdir("/data") else os.getcwd()
                     try:
                         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -470,6 +471,13 @@ def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=N
                             f.write(page.content())
                         page.screenshot(path=png_path, full_page=True)
                         print(f"Scraper Tani: dump yazildi -> {html_path} ; {png_path}")
+                        try:
+                            from telegram_bot import send_document
+                            caption = f"render_fail @ {ts}\n{render_info}"
+                            send_document(png_path, caption=caption)
+                            send_document(html_path, caption=f"render_fail HTML @ {ts}")
+                        except Exception as e:
+                            print(f"Scraper Uyarisi: tani dosyalari Telegram'a yollanamadi: {e}")
                     except Exception as e:
                         print(f"Scraper Uyarisi: tani dump basarisiz: {e}")
 

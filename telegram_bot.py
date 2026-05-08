@@ -71,6 +71,41 @@ def format_odds(odds_dict):
     return f"1: {odds_dict.get('home', '-')} | X: {odds_dict.get('draw', '-')} | 2: {odds_dict.get('away', '-')}"
 
 
+def send_document(path, caption=""):
+    """Telegram'a sendDocument ile bir dosya yollar (HTML, PNG, log vb.).
+    Tani amacli kullanim: render-fail dump'larini Railway'den disari cikarmak."""
+    global _last_send_ts
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"Telegram env'leri bos. Dosya gonderilmedi: {path}")
+        return False
+    if not os.path.isfile(path):
+        print(f"send_document: dosya bulunamadi: {path}")
+        return False
+
+    elapsed = time.monotonic() - _last_send_ts
+    if elapsed < _MIN_SEND_INTERVAL:
+        time.sleep(_MIN_SEND_INTERVAL - elapsed)
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    try:
+        with open(path, "rb") as fh:
+            files = {"document": (os.path.basename(path), fh)}
+            data = {"chat_id": TELEGRAM_CHAT_ID}
+            if caption:
+                data["caption"] = caption[:1024]  # Telegram caption limiti
+            response = requests.post(url, data=data, files=files, timeout=60)
+    except Exception as e:
+        print(f"send_document baglanti hatasi: {e}")
+        return False
+
+    _last_send_ts = time.monotonic()
+    if response.status_code == 200:
+        print(f"Telegram dosya yollandi: {path}")
+        return True
+    print(f"send_document hatasi {response.status_code}: {response.text[:200]}")
+    return False
+
+
 def _start_line(match_info):
     st = (match_info.get('startTime') or '').strip()
     return f"🕒 <b>Başlama:</b> {st}\n" if st else ""
