@@ -4,12 +4,10 @@
 FROM mcr.microsoft.com/playwright/python:v1.59.0-jammy
 
 # Sistem zaman dilimini Europe/Istanbul'a sabitle. ENV TZ tek basina
-# Python'a yansimaz; /etc/localtime symlink + tzdata gerekir.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata \
-    && ln -sf /usr/share/zoneinfo/Europe/Istanbul /etc/localtime \
-    && echo "Europe/Istanbul" > /etc/timezone \
-    && rm -rf /var/lib/apt/lists/*
+# Python'in time modulune yansimaz; /etc/localtime symlink-i gerekir.
+# tzdata MS Playwright image'inda hazir oldugu icin ayrica install etmeye gerek yok.
+RUN ln -sf /usr/share/zoneinfo/Europe/Istanbul /etc/localtime \
+    && echo "Europe/Istanbul" > /etc/timezone
 
 WORKDIR /app
 
