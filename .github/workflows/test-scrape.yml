@@ -1,0 +1,39 @@
+# Manuel test: GitHub Actions IP'si Cloudflare'i geciyor mu?
+# Sonuc OK ise full mimariye (GHA scraper -> Railway ingest API) geceriz.
+# Sonuc FAIL ise lokal'e doneriz.
+name: Test scrape (manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      HEADLESS: "true"
+      USE_CAMOUFOX: "true"
+      TZ: "Europe/Istanbul"
+      ONESHOT: "1"
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Fetch camoufox Firefox
+        run: python -m camoufox fetch
+
+      - name: Run scraper (oneshot)
+        run: python -u main.py

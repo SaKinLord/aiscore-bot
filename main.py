@@ -124,6 +124,13 @@ def main():
     print("AiScore Bot Başlatılıyor...")
     init_db()
 
+    # ONESHOT modu: GitHub Actions / cron tarafindan tek seferlik calistirma
+    # icin. Tarama yapilip surec cikilir, scheduler kurulmaz.
+    if os.environ.get("ONESHOT", "").lower() in ("1", "true", "yes"):
+        print("ONESHOT modu: tek tarama yapilip cikilacak.")
+        job()
+        return
+
     # İlk çalıştırmada hemen bir kez tara (state ısınması için)
     job()
 
