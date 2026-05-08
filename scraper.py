@@ -415,12 +415,30 @@ def _run_scrape(page, max_matches):
             return False
 
     def _try_click_cloudflare_checkbox():
-        """Cloudflare Turnstile checkbox'una tikla. Sayfadaki tum iframe'leri
-        listeleyip Cloudflare-iliskili olanlari farkli selector pattern'leri
-        ile bulmaya calisir; bulununca iframe'in sol-orta noktasina
-        humanized mouse trajektorisi ile click atar."""
-        # Iframe'in DOM'a inmesi icin baslangic ufak bekleme
-        page.wait_for_timeout(3000)
+        """Cloudflare Turnstile checkbox'una tikla. Turnstile API.js async/defer
+        yuklendigi icin iframe dinamik geliyor — beklerken rasgele mouse
+        hareketi yapip 'page idle' gorunmeyelim. Bulununca sol-orta noktaya
+        humanized trajektori ile tikla."""
+        # iframe gelene kadar 25sn'ye varan bekleme + insan-benzeri aktivite
+        deadline = time.monotonic() + 25.0
+        while time.monotonic() < deadline:
+            try:
+                count = page.evaluate("document.querySelectorAll('iframe').length")
+                if count > 0:
+                    break
+            except Exception:
+                pass
+            # Rasgele mouse hareketi (Turnstile aktif sayfa gorsun)
+            try:
+                import random
+                page.mouse.move(
+                    random.randint(200, 1200),
+                    random.randint(100, 700),
+                    steps=random.randint(3, 8),
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
 
         # Tani: sayfadaki tum iframe'leri logla
         try:
