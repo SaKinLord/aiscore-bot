@@ -414,11 +414,42 @@ def _run_scrape(page, max_matches):
         except Exception:
             return False
 
+    def _try_click_cloudflare_checkbox():
+        """Cloudflare Turnstile checkbox'una tikla.
+        Iframe icindeki checkbox shadow-DOM'da olabilir; bu yuzden iframe'in
+        bounding box'inin sol-tarafinda mouse click yapiyoruz (humanize=True
+        ile camoufox bunu insan-benzeri trajektoriyle gerceklestirir)."""
+        try:
+            page.wait_for_selector(
+                'iframe[src*="challenges.cloudflare.com"]',
+                timeout=8000,
+            )
+        except Exception:
+            return False
+        try:
+            iframe_handle = page.locator('iframe[src*="challenges.cloudflare.com"]').first
+            box = iframe_handle.bounding_box()
+            if not box:
+                return False
+            # Checkbox Turnstile widget'inin sol kismindadir.
+            x = box["x"] + 30
+            y = box["y"] + box["height"] / 2
+            page.mouse.click(x, y)
+            print(f"Scraper: Cloudflare checkbox tiklandi @ ({x:.0f},{y:.0f}).")
+            return True
+        except Exception as e:
+            print(f"Scraper Uyarisi: Cloudflare checkbox tiklanamadi: {e}")
+            return False
+
     try:
         print("Scraper: AiScore ana sayfasi aciliyor...")
         page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
 
-        # Cloudflare challenge'in kendi kendine cozulmesi icin yeterli sure ver.
+        # Once kendiliginden cozulmesi icin 8sn bekle, sonra checkbox'i tikla.
+        print("Scraper: Cloudflare iframe icin bekleniyor...")
+        if _try_click_cloudflare_checkbox():
+            page.wait_for_timeout(2000)  # validation icin nefes
+        # Sonra (varsa) Vue mount'unu bekle.
         print("Scraper: Cloudflare/Vue render bekleniyor (45sn'e kadar)...")
         cf_ok = _wait_past_cloudflare(45000)
         if cf_ok:
@@ -428,6 +459,8 @@ def _run_scrape(page, max_matches):
             print(f"Scraper Uyarisi: masaüstü render dogrulanamadi {render_info}; tekrar yukleniyor...")
             try:
                 page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+                if _try_click_cloudflare_checkbox():
+                    page.wait_for_timeout(2000)
                 print("Scraper: 2. denemede Cloudflare/Vue bekleniyor (45sn)...")
                 _wait_past_cloudflare(45000)
                 is_desktop, render_info = _is_desktop_render()
