@@ -646,7 +646,7 @@ def _scrape_with_camoufox(max_matches, headless):
         headless=headless,
         os=("windows",),
         locale=["tr-TR", "tr"],
-        timezone="Europe/Istanbul",
+        timezone_id="Europe/Istanbul",  # Playwright konvansiyonu; geoip'i override eder
         humanize=True,  # mouse hareketlerini insanci yapar (Cloudflare karsi)
         geoip=True,     # IP-bazli geo spoof (timezone yukarida override edildi)
     ) as browser:
@@ -706,7 +706,10 @@ def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=N
         try:
             return _scrape_with_camoufox(max_matches, headless)
         except Exception as e:
-            print(f"Scraper Uyarisi: camoufox hata verdi, playwright'a fallback: {e}")
+            # Camoufox internally async; fail sonrasi sync_playwright fallback
+            # ayni loop'ta calismaz. Onun yerine bos donup bir sonraki cron'u bekle.
+            print(f"Scraper Hatasi: camoufox basarisiz: {e}")
+            return []
     elif _USE_CAMOUFOX and not _CAMOUFOX_AVAILABLE:
         print("Scraper Uyarisi: USE_CAMOUFOX set ama camoufox import edilemedi; playwright kullaniliyor.")
     return _scrape_with_playwright(max_matches, headless)
