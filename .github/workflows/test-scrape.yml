@@ -1,15 +1,18 @@
-# Manuel test: GitHub Actions IP'si Cloudflare'i geciyor mu?
-# Sonuc OK ise full mimariye (GHA scraper -> Railway ingest API) geceriz.
-# Sonuc FAIL ise lokal'e doneriz.
-name: Test scrape (manual)
+# GitHub Actions runner Cloudflare'i geciyor; tum scraping artik burada calisir.
+# - Cron her saatin :12 :27 :42 :57 dakikalarinda (UTC ve Turkiye dakika hizalamasi ayni)
+# - workflow_dispatch elle tetik ihtiyaci icin
+# - aiscore_bot.db actions/cache ile run'lar arasinda persist (dedup state korunur)
+name: Scrape AiScore
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "12,27,42,57 * * * *"
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
 
     env:
       PYTHONUNBUFFERED: "1"
@@ -32,8 +35,31 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt
 
-      - name: Fetch camoufox Firefox
+      - name: Cache camoufox Firefox binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/camoufox
+          key: camoufox-firefox-v1
+
+      - name: Fetch camoufox Firefox (if not cached)
         run: python -m camoufox fetch
 
-      - name: Run scraper (oneshot)
+      # DB cache: tek bir kalici ad altinda hem restore hem save.
+      # actions/cache restore eder ve job sonunda dosya degisikse save eder.
+      - name: Restore DB cache
+        uses: actions/cache/restore@v4
+        with:
+          path: aiscore_bot.db
+          key: aiscore-db-${{ github.run_id }}
+          restore-keys: |
+            aiscore-db-
+
+      - name: Run scraper
         run: python -u main.py
+
+      - name: Save DB cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: aiscore_bot.db
+          key: aiscore-db-${{ github.run_id }}
