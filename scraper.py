@@ -434,24 +434,41 @@ def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=N
                 **desktop_markers,
             }
 
+        # Cloudflare Managed Challenge yok olana + aiscore DOM gelene kadar
+        # bekleyen akilli bir wait. Cloudflare JS challenge'i 5-25sn surebilir.
+        _CF_WAIT_SCRIPT = """() => {
+            const txt = (document.body && document.body.innerText) || '';
+            const cfActive = !!document.querySelector('[name="cf-turnstile-response"]')
+                || /Just a moment|Dogrulaniyor|Doğrulanıyor|Verifying you are human|cf-spinner/i.test(txt);
+            if (cfActive) return false;          // hala challenge ekraninda
+            return !!document.querySelector('.changTabBox');  // gercek site geldi
+        }"""
+
+        def _wait_past_cloudflare(timeout_ms):
+            """Cloudflare challenge'inin kendiliginden cozulmesini bekler.
+            True: cozuldu ve aiscore DOM mevcut. False: timeout."""
+            try:
+                page.wait_for_function(_CF_WAIT_SCRIPT, timeout=timeout_ms)
+                return True
+            except Exception:
+                return False
+
         try:
             print("Scraper: AiScore ana sayfasi aciliyor...")
             page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
 
-            # Masaüstü markerleri Vue mount sonrası görünür; kısa bir pencere bekle.
-            try:
-                page.wait_for_selector(".changTabBox", state="attached", timeout=4000)
-            except Exception:
-                pass
+            # Cloudflare challenge'in kendi kendine cozulmesi icin yeterli sure ver.
+            print("Scraper: Cloudflare/Vue render bekleniyor (45sn'e kadar)...")
+            cf_ok = _wait_past_cloudflare(45000)
+            if cf_ok:
+                print("Scraper: site DOM'a indi (Cloudflare gecildi veya hic yoktu).")
             is_desktop, render_info = _is_desktop_render()
             if not is_desktop:
                 print(f"Scraper Uyarisi: masaüstü render dogrulanamadi {render_info}; tekrar yukleniyor...")
                 try:
                     page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
-                    try:
-                        page.wait_for_selector(".changTabBox", state="attached", timeout=6000)
-                    except Exception:
-                        pass
+                    print("Scraper: 2. denemede Cloudflare/Vue bekleniyor (45sn)...")
+                    _wait_past_cloudflare(45000)
                     is_desktop, render_info = _is_desktop_render()
                 except Exception as e:
                     print(f"Scraper Uyarisi: ikinci goto basarisiz: {e}")
