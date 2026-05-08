@@ -3,6 +3,14 @@
 # Tag = playwright python lib surumu (requirements.txt ile uyumlu olmali).
 FROM mcr.microsoft.com/playwright/python:v1.59.0-jammy
 
+# Sistem zaman dilimini Europe/Istanbul'a sabitle. ENV TZ tek basina
+# Python'a yansimaz; /etc/localtime symlink + tzdata gerekir.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && ln -sf /usr/share/zoneinfo/Europe/Istanbul /etc/localtime \
+    && echo "Europe/Istanbul" > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Pip cache'ini katmana yazmadan paketleri kur. Playwright paketi zaten
