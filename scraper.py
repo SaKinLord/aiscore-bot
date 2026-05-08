@@ -276,7 +276,13 @@ def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=N
     results = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        # Container ortaminda Chromium icin guvenli args:
+        #   --no-sandbox: Docker'da root yoksa sandbox crash eder
+        #   --disable-dev-shm-usage: kucuk /dev/shm bolumlerinde browser donmasini onler
+        browser = p.chromium.launch(
+            headless=headless,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

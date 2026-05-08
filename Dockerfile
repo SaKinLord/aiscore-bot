@@ -21,6 +21,11 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# patchright kendi patched Chromium'unu kullanir; standart playwright
+# binary'si patches'i ic-runtime ile bekledigi icin DNS/network sorunlari
+# cikarabiliyor. Patchright'in kendi browser'ini indirip kuruyoruz.
+RUN python -m patchright install --with-deps chromium
+
 # Uygulama kaynaklari + tarihsel data dosyasi.
 COPY *.py ./
 COPY historical_odds.json ./
