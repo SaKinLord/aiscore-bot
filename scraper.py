@@ -1,4 +1,5 @@
 import os
+import time
 
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
@@ -304,8 +305,11 @@ def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=N
         if stealth_sync is not None:
             try:
                 stealth_sync(page)
+                print("Scraper: stealth_sync uygulandi.")
             except Exception as e:
                 print(f"Scraper Uyarisi: stealth_sync uygulanamadi: {e}")
+        else:
+            print("Scraper Uyarisi: playwright_stealth import edilemedi; stealth pas geciliyor.")
 
         def _prepare_scheduled_list():
             """Scheduled tab'ina geç, Sort-by-time'i aç, ilk batch'i hasat et.
@@ -455,6 +459,19 @@ def fetch_live_and_upcoming_matches(max_matches=MAX_MATCHES_PER_SCAN, headless=N
                     print("Scraper: ikinci denemede masaüstü render geldi.")
                 else:
                     print(f"Scraper Uyarisi: hala masaüstü degil {render_info}; yine de devam ediliyor.")
+                    # Tani amacli: page HTML + screenshot'i volume'e dump et.
+                    # Railway dosya yoneticisinden indirip Cloudflare ne gostermis bakabiliriz.
+                    diag_dir = "/data" if os.path.isdir("/data") else os.getcwd()
+                    try:
+                        ts = time.strftime("%Y%m%d_%H%M%S")
+                        html_path = os.path.join(diag_dir, f"render_fail_{ts}.html")
+                        png_path = os.path.join(diag_dir, f"render_fail_{ts}.png")
+                        with open(html_path, "w", encoding="utf-8") as f:
+                            f.write(page.content())
+                        page.screenshot(path=png_path, full_page=True)
+                        print(f"Scraper Tani: dump yazildi -> {html_path} ; {png_path}")
+                    except Exception as e:
+                        print(f"Scraper Uyarisi: tani dump basarisiz: {e}")
 
             raw_matches = _prepare_scheduled_list()
 

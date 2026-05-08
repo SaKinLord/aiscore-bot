@@ -7,9 +7,13 @@ from dotenv import load_dotenv
 # Local'de .env'i yukle; Railway'de zaten env'ler injected geliyor (load_dotenv no-op).
 load_dotenv()
 
-# Container TZ env'ini Python time modulune yansit (POSIX'te tzset gereklidir).
+# Container TZ env'ini Python time modulune yansit. ENV'de set edilmis olmali
+# ama Railway bazen orchestrator katmaninda override ediyor; emin olmak icin
+# burada explicit set edip tzset cagiriyoruz.
+os.environ.setdefault("TZ", "Europe/Istanbul")
 if hasattr(time, "tzset"):
     time.tzset()
+print(f"[boot] TZ={os.environ.get('TZ')}, simdi={time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
 from database import init_db, has_alert_been_sent, record_alert
 from scraper import get_formatted_matches_with_odds
