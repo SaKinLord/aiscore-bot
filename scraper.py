@@ -415,30 +415,84 @@ def _run_scrape(page, max_matches):
             return False
 
     def _try_click_cloudflare_checkbox():
-        """Cloudflare Turnstile checkbox'una tikla.
-        Iframe icindeki checkbox shadow-DOM'da olabilir; bu yuzden iframe'in
-        bounding box'inin sol-tarafinda mouse click yapiyoruz (humanize=True
-        ile camoufox bunu insan-benzeri trajektoriyle gerceklestirir)."""
+        """Cloudflare Turnstile checkbox'una tikla. Sayfadaki tum iframe'leri
+        listeleyip Cloudflare-iliskili olanlari farkli selector pattern'leri
+        ile bulmaya calisir; bulununca iframe'in sol-orta noktasina
+        humanized mouse trajektorisi ile click atar."""
+        # Iframe'in DOM'a inmesi icin baslangic ufak bekleme
+        page.wait_for_timeout(3000)
+
+        # Tani: sayfadaki tum iframe'leri logla
         try:
-            page.wait_for_selector(
-                'iframe[src*="challenges.cloudflare.com"]',
-                timeout=8000,
+            iframes_info = page.evaluate(
+                """() => Array.from(document.querySelectorAll('iframe')).map(f => {
+                    const r = f.getBoundingClientRect();
+                    return {
+                        src: f.src || '',
+                        name: f.name || '',
+                        title: f.title || '',
+                        id: f.id || '',
+                        cls: (f.className && f.className.toString) ? f.className.toString() : '',
+                        visible: f.offsetWidth > 0 && f.offsetHeight > 0,
+                        x: r.x, y: r.y, w: r.width, h: r.height,
+                    };
+                })"""
             )
         except Exception:
+            iframes_info = []
+        print(f"Scraper Tani: sayfada {len(iframes_info)} iframe:")
+        for fi in iframes_info:
+            print(
+                f"  - src='{(fi.get('src') or '')[:90]}' name='{(fi.get('name') or '')[:40]}' "
+                f"title='{(fi.get('title') or '')[:40]}' visible={fi.get('visible')} "
+                f"pos=({fi.get('x'):.0f},{fi.get('y'):.0f}) size={fi.get('w'):.0f}x{fi.get('h'):.0f}"
+            )
+
+        selectors = [
+            'iframe[src*="challenges.cloudflare.com"]',
+            'iframe[src*="turnstile"]',
+            'iframe[src*="cf-chl"]',
+            'iframe[src*="cdn-cgi"]',
+            'iframe[name*="cf-chl"]',
+            'iframe[title*="Cloudflare"]',
+            'iframe[title*="security challenge"]',
+            'iframe[title*="güvenlik"]',
+        ]
+        iframe_handle = None
+        chosen_sel = None
+        for sel in selectors:
+            try:
+                page.wait_for_selector(sel, timeout=2000)
+                iframe_handle = page.locator(sel).first
+                chosen_sel = sel
+                break
+            except Exception:
+                continue
+
+        if iframe_handle is None:
+            print("Scraper Uyarisi: hicbir selector Cloudflare iframe'i bulamadi.")
             return False
+        print(f"Scraper: Cloudflare iframe bulundu via '{chosen_sel}'")
+
         try:
-            iframe_handle = page.locator('iframe[src*="challenges.cloudflare.com"]').first
             box = iframe_handle.bounding_box()
             if not box:
+                print("Scraper Uyarisi: iframe bounding_box alinamadi.")
                 return False
-            # Checkbox Turnstile widget'inin sol kismindadir.
             x = box["x"] + 30
             y = box["y"] + box["height"] / 2
+            # Humanize: once uzaktan baslayip iframe ortasina yaklas, sonra checkbox.
+            page.mouse.move(box["x"] - 80, box["y"] - 60)
+            page.wait_for_timeout(220)
+            page.mouse.move(box["x"] + box["width"]/2, box["y"] + 30, steps=8)
+            page.wait_for_timeout(180)
+            page.mouse.move(x, y, steps=10)
+            page.wait_for_timeout(150)
             page.mouse.click(x, y)
             print(f"Scraper: Cloudflare checkbox tiklandi @ ({x:.0f},{y:.0f}).")
             return True
         except Exception as e:
-            print(f"Scraper Uyarisi: Cloudflare checkbox tiklanamadi: {e}")
+            print(f"Scraper Uyarisi: Cloudflare click sirasinda hata: {e}")
             return False
 
     try:
